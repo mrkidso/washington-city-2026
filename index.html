@@ -9,7 +9,7 @@
   <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 
-  <!-- Turf.js (for centroids) -->
+  <!-- Turf.js (for pointOnFeature) -->
   <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
   <style>
@@ -28,7 +28,7 @@
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
       font-size: 14px;
       line-height: 1.2;
-      max-width: 280px;
+      max-width: 310px;
       user-select: none;
     }
 
@@ -81,33 +81,33 @@
 
     .muted { color: #666; font-size: 12px; margin-top: 6px; }
 
-    /* ---- HTML label markers (non-clickable) ---- */
+    /* ========= HTML label markers ========= */
+    :root {
+      --labelSize: 14px; /* updated dynamically on zoom */
+    }
+
     .map-label {
       position: relative;
       transform: translate(-50%, -50%);
       white-space: nowrap;
-      pointer-events: none; /* IMPORTANT: not clickable/selectable */
+      pointer-events: none; /* not clickable/selectable */
       user-select: none;
+
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      font-weight: 700;
+      font-weight: 800;
+      font-size: var(--labelSize);
+
       text-shadow:
-        0 1px 0 rgba(0,0,0,0.65),
-        1px 0 0 rgba(0,0,0,0.65),
-        0 -1px 0 rgba(0,0,0,0.65),
-        -1px 0 0 rgba(0,0,0,0.65),
-        0 2px 6px rgba(0,0,0,0.5);
+        0 1px 0 rgba(0,0,0,0.70),
+        1px 0 0 rgba(0,0,0,0.70),
+        0 -1px 0 rgba(0,0,0,0.70),
+        -1px 0 0 rgba(0,0,0,0.70),
+        0 2px 6px rgba(0,0,0,0.55);
       line-height: 1.1;
     }
 
-    .label-annex {
-      color: #ffffff;
-      font-weight: 800;
-    }
-
-    .label-boundary {
-      color: rgb(255, 90, 90);
-      font-weight: 800;
-    }
+    .label-annex { color: #ffffff; }
+    .label-boundary { color: rgb(255, 90, 90); }
   </style>
 </head>
 
@@ -134,26 +134,27 @@
         <span>New City Boundaries (red outline)</span>
       </div>
       <div class="muted">
-        Labels (HTML markers): annex uses <code>Des</code>, boundaries uses <code>name</code> (case-insensitive fallbacks).<br/>
-        Zoom in/out: label size scales automatically.
+        Labels are placed using <code>pointOnFeature</code> (inside/on polygons).<br/>
+        Annex label field: <code>Des</code> • Boundary label field: <code>name</code><br/>
+        Zoom changes label text size.
       </div>
     </div>
   </div>
 
   <script>
-    // ====== CONFIG ======
+    // ====== FILES (must match your repo filenames exactly) ======
     const ANNEX_URL = "./new annex.geojson";
     const BOUNDARIES_URL = "./new city boundaries.geojson";
 
+    // ====== IDs ======
     const SRC_ANNEX = "src-annex";
     const SRC_BOUND = "src-boundaries";
 
     const LYR_ANNEX_FILL = "annex-fill";
     const LYR_ANNEX_OUTLINE = "annex-outline";
-
     const LYR_BOUND_LINE = "boundaries-line";
 
-    // ====== BASEMAP STYLE (Satellite + Reference boundaries/labels) ======
+    // ====== BASEMAP (Satellite + state/city reference) ======
     const style = {
       version: 8,
       sources: {
@@ -164,7 +165,7 @@
           ],
           tileSize: 256,
           attribution:
-            'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+            'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
         },
         "esri-reference": {
           type: "raster",
@@ -190,7 +191,7 @@
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 
-    // ---- HTML label storage ----
+    // ====== HTML label markers ======
     const annexLabelMarkers = [];
     const boundaryLabelMarkers = [];
 
@@ -200,15 +201,24 @@
       if (geojson.type === "FeatureCollection") return geojson;
       if (geojson.type === "Feature") return { type: "FeatureCollection", features: [geojson] };
       if (geojson.type && geojson.coordinates) {
-        return { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: geojson }] };
+        return {
+          type: "FeatureCollection",
+          features: [{ type: "Feature", properties: {}, geometry: geojson }]
+        };
       }
       throw new Error("Unsupported GeoJSON type: " + (geojson.type || typeof geojson));
     }
 
-    function computeBounds(featureCollection) {
+    async function loadGeoJSON(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`);
+      return toFeatureCollection(await res.json());
+    }
+
+    function computeBounds(fc) {
       let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
 
-      const scanCoords = (coords) => {
+      const scan = (coords) => {
         if (!coords) return;
         if (typeof coords[0] === "number" && typeof coords[1] === "number") {
           const lng = coords[0], lat = coords[1];
@@ -218,11 +228,11 @@
           if (lat > maxLat) maxLat = lat;
           return;
         }
-        for (const c of coords) scanCoords(c);
+        for (const c of coords) scan(c);
       };
 
-      for (const f of featureCollection.features || []) {
-        if (f && f.geometry) scanCoords(f.geometry.coordinates);
+      for (const f of (fc.features || [])) {
+        if (f && f.geometry) scan(f.geometry.coordinates);
       }
 
       if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) return null;
@@ -238,31 +248,34 @@
       ];
     }
 
-    function getPropInsensitive(props, preferredKeys) {
+    function getPropInsensitive(props, keysPreferred) {
       if (!props) return "";
-      for (const k of preferredKeys) {
-        if (props[k] !== undefined && props[k] !== null && String(props[k]).trim() !== "") return String(props[k]);
+      // direct checks
+      for (const k of keysPreferred) {
+        const v = props[k];
+        if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
       }
-      // fallback: case-insensitive search
-      const lowerMap = {};
-      for (const key of Object.keys(props)) lowerMap[key.toLowerCase()] = key;
-      for (const k of preferredKeys) {
-        const found = lowerMap[String(k).toLowerCase()];
-        if (found && props[found] !== undefined && props[found] !== null && String(props[found]).trim() !== "") {
-          return String(props[found]);
+      // case-insensitive fallback
+      const lower = {};
+      for (const k of Object.keys(props)) lower[k.toLowerCase()] = k;
+      for (const k of keysPreferred) {
+        const hit = lower[String(k).toLowerCase()];
+        if (hit) {
+          const v = props[hit];
+          if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
         }
       }
       return "";
     }
 
-    async function loadGeoJSON(url) {
-      const res = await fetch(url, { cache: "no-store" });
-      if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`);
-      const gj = await res.json();
-      return toFeatureCollection(gj);
+    function clearLabels(arr) {
+      while (arr.length) {
+        const m = arr.pop();
+        try { m.remove(); } catch (_) {}
+      }
     }
 
-    function addPolygonLayers() {
+    function addVectorLayers() {
       // Annex: 50% transparent fill + outline
       map.addLayer({
         id: LYR_ANNEX_FILL,
@@ -280,7 +293,7 @@
         source: SRC_ANNEX,
         paint: {
           "line-color": "rgb(0, 90, 180)",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1, 12, 2.5, 16, 4]
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.2, 12, 2.8, 16, 4.6]
         }
       });
 
@@ -291,8 +304,7 @@
         source: SRC_BOUND,
         paint: {
           "line-color": "red",
-          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2, 12, 4, 16, 6],
-          "line-opacity": 1.0
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.2, 12, 4.2, 16, 6.2]
         }
       });
     }
@@ -303,74 +315,63 @@
         if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
       });
 
-      // Also toggle annex HTML labels
+      // toggle annex HTML labels too
       annexLabelMarkers.forEach(m => {
-        const el = m.getElement();
-        el.style.display = visible ? "" : "none";
+        m.getElement().style.display = visible ? "" : "none";
       });
     }
 
-    function fontSizeForZoom(z) {
-      // Smooth scaling (tweak if you want bigger/smaller)
-      // At z=10 ~ 12px, z=13 ~ 16px, z=16 ~ 20px
-      const size = 12 + (z - 10) * 1.33;
-      return Math.max(10, Math.min(22, size));
+    // ====== TRUE label scaling via CSS variable ======
+    function labelPxForZoom(z) {
+      // Tune these however you want:
+      // z=10 -> ~12px, z=13 -> ~16px, z=16 -> ~20px
+      const px = 12 + (z - 10) * 1.33;
+      return Math.max(10, Math.min(26, px));
     }
 
-    function refreshLabelSizes() {
-      const z = map.getZoom();
-      const px = fontSizeForZoom(z);
-
-      const all = [...annexLabelMarkers, ...boundaryLabelMarkers];
-      for (const m of all) {
-        const el = m.getElement();
-        el.style.fontSize = px + "px";
-      }
+    let rafPending = false;
+    function updateLabelSize() {
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        const px = labelPxForZoom(map.getZoom());
+        document.documentElement.style.setProperty("--labelSize", px + "px");
+      });
     }
 
-    function clearLabels(arr) {
-      while (arr.length) {
-        const m = arr.pop();
-        try { m.remove(); } catch (_) {}
-      }
-    }
+    function buildLabels(fc, which) {
+      const isAnnex = which === "annex";
+      const markers = isAnnex ? annexLabelMarkers : boundaryLabelMarkers;
+      const cls = isAnnex ? "label-annex" : "label-boundary";
 
-    function buildLabelsFromGeoJSON(featureCollection, which) {
-      // which: "annex" or "boundary"
-      const markers = (which === "annex") ? annexLabelMarkers : boundaryLabelMarkers;
-      const labelClass = (which === "annex") ? "label-annex" : "label-boundary";
-
-      // clear old (in case of reload)
       clearLabels(markers);
 
-      for (const f of (featureCollection.features || [])) {
+      for (const f of (fc.features || [])) {
         if (!f || !f.geometry) continue;
 
-        let labelText = "";
-        if (which === "annex") {
-          labelText = getPropInsensitive(f.properties, ["Des", "DES", "des"]);
-        } else {
-          labelText = getPropInsensitive(f.properties, ["name", "Name", "NAME"]);
-        }
+        const text = isAnnex
+          ? getPropInsensitive(f.properties, ["Des", "DES", "des"])
+          : getPropInsensitive(f.properties, ["name", "Name", "NAME"]);
 
-        labelText = (labelText || "").trim();
+        const labelText = (text || "").trim();
         if (!labelText) continue;
 
-        let c;
+        // IMPORTANT FIX: ensure label point is on/inside the polygon
+        let pt;
         try {
-          c = turf.centroid(f);
+          pt = turf.pointOnFeature(f);
         } catch (e) {
-          // centroid can fail for invalid geometries; skip quietly
+          // If geometry is invalid, skip this feature
           continue;
         }
 
-        const coords = c && c.geometry && c.geometry.coordinates;
+        const coords = pt && pt.geometry && pt.geometry.coordinates;
         if (!coords || coords.length < 2) continue;
 
         const el = document.createElement("div");
-        el.className = `map-label ${labelClass}`;
+        el.className = `map-label ${cls}`;
         el.textContent = labelText;
-        el.style.pointerEvents = "none";
 
         const marker = new maplibregl.Marker({ element: el, anchor: "center" })
           .setLngLat([coords[0], coords[1]])
@@ -379,10 +380,11 @@
         markers.push(marker);
       }
 
-      refreshLabelSizes();
+      // apply current size immediately
+      updateLabelSize();
     }
 
-    // ====== LOAD DATA + BUILD MAP ======
+    // ====== INIT ======
     map.on("load", async () => {
       try {
         const [annexFC, boundsFC] = await Promise.all([
@@ -393,35 +395,33 @@
         map.addSource(SRC_ANNEX, { type: "geojson", data: annexFC });
         map.addSource(SRC_BOUND, { type: "geojson", data: boundsFC });
 
-        addPolygonLayers();
+        addVectorLayers();
 
-        // Fit to combined bounds
-        const b1 = computeBounds(annexFC);
-        const b2 = computeBounds(boundsFC);
-        const merged = mergeBounds(b1, b2);
+        // Fit to both datasets
+        const merged = mergeBounds(computeBounds(annexFC), computeBounds(boundsFC));
         if (merged) map.fitBounds(merged, { padding: 40, duration: 0 });
 
-        // Build HTML labels
-        buildLabelsFromGeoJSON(boundsFC, "boundary");
-        buildLabelsFromGeoJSON(annexFC, "annex");
+        // Build labels (HTML markers)
+        buildLabels(boundsFC, "boundary");
+        buildLabels(annexFC, "annex");
 
-        // Keep them sized on zoom
-        map.on("zoom", refreshLabelSizes);
+        // Zoom-driven label scaling (real size change)
+        updateLabelSize();
+        map.on("zoom", updateLabelSize);
+        map.on("zoomend", updateLabelSize);
 
         // No click/select behavior
         map.getCanvas().style.cursor = "";
 
-        // Toggle annex fill + labels
+        // Toggle annex
         const toggle = document.getElementById("toggleAnnex");
-        toggle.addEventListener("change", () => {
-          setAnnexVisibility(toggle.checked);
-        });
+        toggle.addEventListener("change", () => setAnnexVisibility(toggle.checked));
 
       } catch (err) {
         console.error(err);
         alert(
           "Map data failed to load.\n\n" +
-          "Check that these files exist in your repo root and names match exactly:\n" +
+          "Confirm these files exist in the repo root and names match exactly:\n" +
           " - new annex.geojson\n" +
           " - new city boundaries.geojson\n\n" +
           "Error: " + err.message

@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Washington City 2026 – Annexation & New City Boundaries</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- MapLibre GL -->
+  <link
+    href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
+    rel="stylesheet"
+  />
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    #map { height: 100%; width: 100%; }
+
+    .controls {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      z-index: 10;
+      background: rgba(255,255,255,0.92);
+      border-radius: 10px;
+      padding: 10px 12px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.2;
+      max-width: 280px;
+      user-select: none;
+    }
+
+    .controls .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin: 6px 0;
+    }
+
+    .controls .title {
+      font-weight: 700;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f2f2f2;
+      cursor: pointer;
+    }
+
+    input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
+    .legend {
+      margin-top: 8px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+      padding-top: 8px;
+      color: #333;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 3px;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 8px;
+      border: 1px solid rgba(0,0,0,0.2);
+    }
+
+    .muted { color: #666; font-size: 12px; margin-top: 6px; }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+
+  <div class="controls">
+    <div class="title">Layers</div>
+
+    <div class="row">
+      <label class="pill" for="toggleAnnex" title="Toggle the annex polygon on/off">
+        <input id="toggleAnnex" type="checkbox" checked />
+        <span>Show <strong>new annex.geojson</strong></span>
+      </label>
+    </div>
+
+    <div class="legend">
+      <div class="row" style="justify-content:flex-start;">
+        <span class="swatch" style="background: rgba(0, 140, 255, 0.50);"></span>
+        <span>Annex (50% transparent fill)</span>
+      </div>
+      <div class="row" style="justify-content:flex-start;">
+        <span class="swatch" style="background: transparent; border: 2px solid red;"></span>
+        <span>New City Boundaries (red outline)</span>
+      </div>
+      <div class="muted">
+        Labels: <code>Des</code> (annex) and <code>name</code> (boundaries).<br/>
+        Tip: zoom in/out to see text size adjust.
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ====== CONFIG ======
+    // Make sure these filenames match exactly what’s in your repo.
+    // You said: "new annex.geojson" and "new city boundaries.geojson"
+    const ANNEX_URL = "./new annex.geojson";
+    const BOUNDARIES_URL = "./new city boundaries.geojson";
+
+    // Layer/source IDs
+    const SRC_ANNEX = "src-annex";
+    const SRC_BOUND = "src-boundaries";
+
+    const LYR_ANNEX_FILL = "annex-fill";
+    const LYR_ANNEX_OUTLINE = "annex-outline";
+    const LYR_ANNEX_LABEL = "annex-label";
+
+    const LYR_BOUND_LINE = "boundaries-line";
+    const LYR_BOUND_LABEL = "boundaries-label";
+
+    // ====== BASEMAP STYLE (Satellite + Reference boundaries/labels) ======
+    // Esri World Imagery + Esri World Boundaries & Places (reference) as raster tiles.
+    // These are public tile endpoints commonly used for basemaps.
+    const style = {
+      version: 8,
+      sources: {
+        "esri-imagery": {
+          type: "raster",
+          tiles: [
+            "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+          ],
+          tileSize: 256,
+          attribution:
+            'Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+        },
+        "esri-reference": {
+          type: "raster",
+          tiles: [
+            "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+          ],
+          tileSize: 256
+        }
+      },
+      layers: [
+        { id: "imagery", type: "raster", source: "esri-imagery" },
+        { id: "reference", type: "raster", source: "esri-reference" }
+      ]
+    };
+
+    const map = new maplibregl.Map({
+      container: "map",
+      style,
+      center: [-113.51, 37.13], // fallback (St. George-ish); we'll fit to data once loaded
+      zoom: 11,
+      hash: true
+    });
+
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+
+    // ====== HELPERS ======
+    function toFeatureCollection(geojson) {
+      if (!geojson) throw new Error("Empty GeoJSON");
+      if (geojson.type === "FeatureCollection") return geojson;
+      if (geojson.type === "Feature") return { type: "FeatureCollection", features: [geojson] };
+      // geometry object
+      if (geojson.type && geojson.coordinates) {
+        return { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: geojson }] };
+      }
+      throw new Error("Unsupported GeoJSON type: " + (geojson.type || typeof geojson));
+    }
+
+    function computeBounds(featureCollection) {
+      // Returns [[minLng, minLat], [maxLng, maxLat]]
+      let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+
+      const scanCoords = (coords) => {
+        if (!coords) return;
+        if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+          const lng = coords[0], lat = coords[1];
+          if (lng < minLng) minLng = lng;
+          if (lat < minLat) minLat = lat;
+          if (lng > maxLng) maxLng = lng;
+          if (lat > maxLat) maxLat = lat;
+          return;
+        }
+        for (const c of coords) scanCoords(c);
+      };
+
+      for (const f of featureCollection.features || []) {
+        if (f && f.geometry) scanCoords(f.geometry.coordinates);
+      }
+
+      if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) {
+        return null;
+      }
+      return [[minLng, minLat], [maxLng, maxLat]];
+    }
+
+    function mergeBounds(boundsA, boundsB) {
+      if (!boundsA) return boundsB;
+      if (!boundsB) return boundsA;
+      return [
+        [Math.min(boundsA[0][0], boundsB[0][0]), Math.min(boundsA[0][1], boundsB[0][1])],
+        [Math.max(boundsA[1][0], boundsB[1][0]), Math.max(boundsA[1][1], boundsB[1][1])]
+      ];
+    }
+
+    function safeGet(feature, fieldName) {
+      if (!feature || !feature.properties) return "";
+      const v = feature.properties[fieldName];
+      if (v === null || v === undefined) return "";
+      return String(v);
+    }
+
+    async function loadGeoJSON(url) {
+      const res = await fetch(url, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to load ${url} (${res.status})`);
+      const gj = await res.json();
+      return toFeatureCollection(gj);
+    }
+
+    function addAnnexLayers() {
+      // 50% transparent solid fill + subtle outline
+      map.addLayer({
+        id: LYR_ANNEX_FILL,
+        type: "fill",
+        source: SRC_ANNEX,
+        paint: {
+          "fill-color": "rgb(0, 140, 255)",
+          "fill-opacity": 0.50
+        }
+      });
+
+      map.addLayer({
+        id: LYR_ANNEX_OUTLINE,
+        type: "line",
+        source: SRC_ANNEX,
+        paint: {
+          "line-color": "rgb(0, 90, 180)",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1, 12, 2.5, 16, 4]
+        }
+      });
+
+      // Labels from "Des"
+      map.addLayer({
+        id: LYR_ANNEX_LABEL,
+        type: "symbol",
+        source: SRC_ANNEX,
+        layout: {
+          "text-field": ["coalesce", ["get", "Des"], ""],
+          "text-font": ["Noto Sans Regular", "Arial Unicode MS Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 13, 14, 16, 18],
+          "text-offset": [0, 0],
+          "text-anchor": "center",
+          "text-allow-overlap": false,
+          "text-ignore-placement": false
+        },
+        paint: {
+          "text-color": "white",
+          "text-halo-color": "rgba(0,0,0,0.65)",
+          "text-halo-width": 1.5
+        }
+      });
+    }
+
+    function addBoundaryLayers() {
+      // Solid red, OPEN polygon (outline only)
+      map.addLayer({
+        id: LYR_BOUND_LINE,
+        type: "line",
+        source: SRC_BOUND,
+        paint: {
+          "line-color": "red",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2, 12, 4, 16, 6],
+          "line-opacity": 1.0
+        }
+      });
+
+      // Labels from "name"
+      map.addLayer({
+        id: LYR_BOUND_LABEL,
+        type: "symbol",
+        source: SRC_BOUND,
+        layout: {
+          "text-field": ["coalesce", ["get", "name"], ""],
+          "text-font": ["Noto Sans Bold", "Arial Unicode MS Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], 10, 12, 13, 15, 16, 19],
+          "text-anchor": "center",
+          "text-allow-overlap": false,
+          "text-ignore-placement": false
+        },
+        paint: {
+          "text-color": "rgb(255, 80, 80)",
+          "text-halo-color": "rgba(0,0,0,0.70)",
+          "text-halo-width": 1.6
+        }
+      });
+    }
+
+    function setAnnexVisibility(visible) {
+      const v = visible ? "visible" : "none";
+      [LYR_ANNEX_FILL, LYR_ANNEX_OUTLINE, LYR_ANNEX_LABEL].forEach((id) => {
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
+      });
+    }
+
+    // ====== LOAD DATA + BUILD MAP ======
+    map.on("load", async () => {
+      let annexFC = null;
+      let boundsFC = null;
+
+      try {
+        // Load both GeoJSON files
+        const [annex, bounds] = await Promise.all([
+          loadGeoJSON(ANNEX_URL),
+          loadGeoJSON(BOUNDARIES_URL)
+        ]);
+
+        annexFC = annex;
+        boundsFC = bounds;
+
+        // Add sources
+        map.addSource(SRC_ANNEX, { type: "geojson", data: annexFC });
+        map.addSource(SRC_BOUND, { type: "geojson", data: boundsFC });
+
+        // Add layers (order: annex below the red boundaries, so red stands out)
+        addAnnexLayers();
+        addBoundaryLayers();
+
+        // Fit map to combined bounds
+        const b1 = computeBounds(annexFC);
+        const b2 = computeBounds(boundsFC);
+        const merged = mergeBounds(b1, b2);
+        if (merged) {
+          map.fitBounds(merged, { padding: 40, duration: 0 });
+        }
+
+        // Ensure no “click selection” behavior:
+        // (We simply do not register click handlers, and do not use feature-state interactions.)
+        // Also keep cursor default.
+        map.getCanvas().style.cursor = "";
+
+      } catch (err) {
+        console.error(err);
+        alert(
+          "Map data failed to load.\n\n" +
+          "Check that these files exist in your repo root and names match exactly:\n" +
+          " - new annex.geojson\n" +
+          " - new city boundaries.geojson\n\n" +
+          "Error: " + err.message
+        );
+      }
+
+      // Toggle control
+      const toggle = document.getElementById("toggleAnnex");
+      toggle.addEventListener("change", () => {
+        setAnnexVisibility(toggle.checked);
+      });
+    });
+  </script>
+</body>
+</html>

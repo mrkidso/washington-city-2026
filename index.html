@@ -6,11 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
   <!-- MapLibre GL -->
-  <link
-    href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
-    rel="stylesheet"
-  />
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+
+  <!-- Turf.js (for centroids) -->
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
 
   <style>
     html, body { height: 100%; margin: 0; }
@@ -80,6 +80,34 @@
     }
 
     .muted { color: #666; font-size: 12px; margin-top: 6px; }
+
+    /* ---- HTML label markers (non-clickable) ---- */
+    .map-label {
+      position: relative;
+      transform: translate(-50%, -50%);
+      white-space: nowrap;
+      pointer-events: none; /* IMPORTANT: not clickable/selectable */
+      user-select: none;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      font-weight: 700;
+      text-shadow:
+        0 1px 0 rgba(0,0,0,0.65),
+        1px 0 0 rgba(0,0,0,0.65),
+        0 -1px 0 rgba(0,0,0,0.65),
+        -1px 0 0 rgba(0,0,0,0.65),
+        0 2px 6px rgba(0,0,0,0.5);
+      line-height: 1.1;
+    }
+
+    .label-annex {
+      color: #ffffff;
+      font-weight: 800;
+    }
+
+    .label-boundary {
+      color: rgb(255, 90, 90);
+      font-weight: 800;
+    }
   </style>
 </head>
 
@@ -106,33 +134,26 @@
         <span>New City Boundaries (red outline)</span>
       </div>
       <div class="muted">
-        Labels: <code>Des</code> (annex) and <code>name</code> (boundaries).<br/>
-        Tip: zoom in/out to see text size adjust.
+        Labels (HTML markers): annex uses <code>Des</code>, boundaries uses <code>name</code> (case-insensitive fallbacks).<br/>
+        Zoom in/out: label size scales automatically.
       </div>
     </div>
   </div>
 
   <script>
     // ====== CONFIG ======
-    // Make sure these filenames match exactly what’s in your repo.
-    // You said: "new annex.geojson" and "new city boundaries.geojson"
     const ANNEX_URL = "./new annex.geojson";
     const BOUNDARIES_URL = "./new city boundaries.geojson";
 
-    // Layer/source IDs
     const SRC_ANNEX = "src-annex";
     const SRC_BOUND = "src-boundaries";
 
     const LYR_ANNEX_FILL = "annex-fill";
     const LYR_ANNEX_OUTLINE = "annex-outline";
-    const LYR_ANNEX_LABEL = "annex-label";
 
     const LYR_BOUND_LINE = "boundaries-line";
-    const LYR_BOUND_LABEL = "boundaries-label";
 
     // ====== BASEMAP STYLE (Satellite + Reference boundaries/labels) ======
-    // Esri World Imagery + Esri World Boundaries & Places (reference) as raster tiles.
-    // These are public tile endpoints commonly used for basemaps.
     const style = {
       version: 8,
       sources: {
@@ -162,19 +183,22 @@
     const map = new maplibregl.Map({
       container: "map",
       style,
-      center: [-113.51, 37.13], // fallback (St. George-ish); we'll fit to data once loaded
+      center: [-113.51, 37.13],
       zoom: 11,
       hash: true
     });
 
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
 
+    // ---- HTML label storage ----
+    const annexLabelMarkers = [];
+    const boundaryLabelMarkers = [];
+
     // ====== HELPERS ======
     function toFeatureCollection(geojson) {
       if (!geojson) throw new Error("Empty GeoJSON");
       if (geojson.type === "FeatureCollection") return geojson;
       if (geojson.type === "Feature") return { type: "FeatureCollection", features: [geojson] };
-      // geometry object
       if (geojson.type && geojson.coordinates) {
         return { type: "FeatureCollection", features: [{ type: "Feature", properties: {}, geometry: geojson }] };
       }
@@ -182,7 +206,6 @@
     }
 
     function computeBounds(featureCollection) {
-      // Returns [[minLng, minLat], [maxLng, maxLat]]
       let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
 
       const scanCoords = (coords) => {
@@ -202,26 +225,34 @@
         if (f && f.geometry) scanCoords(f.geometry.coordinates);
       }
 
-      if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) {
-        return null;
-      }
+      if (!isFinite(minLng) || !isFinite(minLat) || !isFinite(maxLng) || !isFinite(maxLat)) return null;
       return [[minLng, minLat], [maxLng, maxLat]];
     }
 
-    function mergeBounds(boundsA, boundsB) {
-      if (!boundsA) return boundsB;
-      if (!boundsB) return boundsA;
+    function mergeBounds(a, b) {
+      if (!a) return b;
+      if (!b) return a;
       return [
-        [Math.min(boundsA[0][0], boundsB[0][0]), Math.min(boundsA[0][1], boundsB[0][1])],
-        [Math.max(boundsA[1][0], boundsB[1][0]), Math.max(boundsA[1][1], boundsB[1][1])]
+        [Math.min(a[0][0], b[0][0]), Math.min(a[0][1], b[0][1])],
+        [Math.max(a[1][0], b[1][0]), Math.max(a[1][1], b[1][1])]
       ];
     }
 
-    function safeGet(feature, fieldName) {
-      if (!feature || !feature.properties) return "";
-      const v = feature.properties[fieldName];
-      if (v === null || v === undefined) return "";
-      return String(v);
+    function getPropInsensitive(props, preferredKeys) {
+      if (!props) return "";
+      for (const k of preferredKeys) {
+        if (props[k] !== undefined && props[k] !== null && String(props[k]).trim() !== "") return String(props[k]);
+      }
+      // fallback: case-insensitive search
+      const lowerMap = {};
+      for (const key of Object.keys(props)) lowerMap[key.toLowerCase()] = key;
+      for (const k of preferredKeys) {
+        const found = lowerMap[String(k).toLowerCase()];
+        if (found && props[found] !== undefined && props[found] !== null && String(props[found]).trim() !== "") {
+          return String(props[found]);
+        }
+      }
+      return "";
     }
 
     async function loadGeoJSON(url) {
@@ -231,8 +262,8 @@
       return toFeatureCollection(gj);
     }
 
-    function addAnnexLayers() {
-      // 50% transparent solid fill + subtle outline
+    function addPolygonLayers() {
+      // Annex: 50% transparent fill + outline
       map.addLayer({
         id: LYR_ANNEX_FILL,
         type: "fill",
@@ -253,30 +284,7 @@
         }
       });
 
-      // Labels from "Des"
-      map.addLayer({
-        id: LYR_ANNEX_LABEL,
-        type: "symbol",
-        source: SRC_ANNEX,
-        layout: {
-          "text-field": ["coalesce", ["get", "Des"], ""],
-          "text-font": ["Noto Sans Regular", "Arial Unicode MS Regular"],
-          "text-size": ["interpolate", ["linear"], ["zoom"], 10, 11, 13, 14, 16, 18],
-          "text-offset": [0, 0],
-          "text-anchor": "center",
-          "text-allow-overlap": false,
-          "text-ignore-placement": false
-        },
-        paint: {
-          "text-color": "white",
-          "text-halo-color": "rgba(0,0,0,0.65)",
-          "text-halo-width": 1.5
-        }
-      });
-    }
-
-    function addBoundaryLayers() {
-      // Solid red, OPEN polygon (outline only)
+      // Boundaries: red outline only
       map.addLayer({
         id: LYR_BOUND_LINE,
         type: "line",
@@ -287,70 +295,127 @@
           "line-opacity": 1.0
         }
       });
-
-      // Labels from "name"
-      map.addLayer({
-        id: LYR_BOUND_LABEL,
-        type: "symbol",
-        source: SRC_BOUND,
-        layout: {
-          "text-field": ["coalesce", ["get", "name"], ""],
-          "text-font": ["Noto Sans Bold", "Arial Unicode MS Regular"],
-          "text-size": ["interpolate", ["linear"], ["zoom"], 10, 12, 13, 15, 16, 19],
-          "text-anchor": "center",
-          "text-allow-overlap": false,
-          "text-ignore-placement": false
-        },
-        paint: {
-          "text-color": "rgb(255, 80, 80)",
-          "text-halo-color": "rgba(0,0,0,0.70)",
-          "text-halo-width": 1.6
-        }
-      });
     }
 
     function setAnnexVisibility(visible) {
       const v = visible ? "visible" : "none";
-      [LYR_ANNEX_FILL, LYR_ANNEX_OUTLINE, LYR_ANNEX_LABEL].forEach((id) => {
+      [LYR_ANNEX_FILL, LYR_ANNEX_OUTLINE].forEach((id) => {
         if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
       });
+
+      // Also toggle annex HTML labels
+      annexLabelMarkers.forEach(m => {
+        const el = m.getElement();
+        el.style.display = visible ? "" : "none";
+      });
+    }
+
+    function fontSizeForZoom(z) {
+      // Smooth scaling (tweak if you want bigger/smaller)
+      // At z=10 ~ 12px, z=13 ~ 16px, z=16 ~ 20px
+      const size = 12 + (z - 10) * 1.33;
+      return Math.max(10, Math.min(22, size));
+    }
+
+    function refreshLabelSizes() {
+      const z = map.getZoom();
+      const px = fontSizeForZoom(z);
+
+      const all = [...annexLabelMarkers, ...boundaryLabelMarkers];
+      for (const m of all) {
+        const el = m.getElement();
+        el.style.fontSize = px + "px";
+      }
+    }
+
+    function clearLabels(arr) {
+      while (arr.length) {
+        const m = arr.pop();
+        try { m.remove(); } catch (_) {}
+      }
+    }
+
+    function buildLabelsFromGeoJSON(featureCollection, which) {
+      // which: "annex" or "boundary"
+      const markers = (which === "annex") ? annexLabelMarkers : boundaryLabelMarkers;
+      const labelClass = (which === "annex") ? "label-annex" : "label-boundary";
+
+      // clear old (in case of reload)
+      clearLabels(markers);
+
+      for (const f of (featureCollection.features || [])) {
+        if (!f || !f.geometry) continue;
+
+        let labelText = "";
+        if (which === "annex") {
+          labelText = getPropInsensitive(f.properties, ["Des", "DES", "des"]);
+        } else {
+          labelText = getPropInsensitive(f.properties, ["name", "Name", "NAME"]);
+        }
+
+        labelText = (labelText || "").trim();
+        if (!labelText) continue;
+
+        let c;
+        try {
+          c = turf.centroid(f);
+        } catch (e) {
+          // centroid can fail for invalid geometries; skip quietly
+          continue;
+        }
+
+        const coords = c && c.geometry && c.geometry.coordinates;
+        if (!coords || coords.length < 2) continue;
+
+        const el = document.createElement("div");
+        el.className = `map-label ${labelClass}`;
+        el.textContent = labelText;
+        el.style.pointerEvents = "none";
+
+        const marker = new maplibregl.Marker({ element: el, anchor: "center" })
+          .setLngLat([coords[0], coords[1]])
+          .addTo(map);
+
+        markers.push(marker);
+      }
+
+      refreshLabelSizes();
     }
 
     // ====== LOAD DATA + BUILD MAP ======
     map.on("load", async () => {
-      let annexFC = null;
-      let boundsFC = null;
-
       try {
-        // Load both GeoJSON files
-        const [annex, bounds] = await Promise.all([
+        const [annexFC, boundsFC] = await Promise.all([
           loadGeoJSON(ANNEX_URL),
           loadGeoJSON(BOUNDARIES_URL)
         ]);
 
-        annexFC = annex;
-        boundsFC = bounds;
-
-        // Add sources
         map.addSource(SRC_ANNEX, { type: "geojson", data: annexFC });
         map.addSource(SRC_BOUND, { type: "geojson", data: boundsFC });
 
-        // Add layers (order: annex below the red boundaries, so red stands out)
-        addAnnexLayers();
-        addBoundaryLayers();
+        addPolygonLayers();
 
-        // Fit map to combined bounds
+        // Fit to combined bounds
         const b1 = computeBounds(annexFC);
         const b2 = computeBounds(boundsFC);
         const merged = mergeBounds(b1, b2);
-        if (merged) {
-          map.fitBounds(merged, { padding: 40, duration: 0 });
-        }
+        if (merged) map.fitBounds(merged, { padding: 40, duration: 0 });
 
-        // Ensure no “click selection” behavior:
-        // (We simply do not register click handlers, and do not use feature-state interactions.)
-        // Also keep cursor default.
+        // Build HTML labels
+        buildLabelsFromGeoJSON(boundsFC, "boundary");
+        buildLabelsFromGeoJSON(annexFC, "annex");
+
+        // Keep them sized on zoom
+        map.on("zoom", refreshLabelSizes);
+
+        // No click/select behavior
         map.getCanvas().style.cursor = "";
+
+        // Toggle annex fill + labels
+        const toggle = document.getElementById("toggleAnnex");
+        toggle.addEventListener("change", () => {
+          setAnnexVisibility(toggle.checked);
+        });
 
       } catch (err) {
         console.error(err);
@@ -362,12 +427,6 @@
           "Error: " + err.message
         );
       }
-
-      // Toggle control
-      const toggle = document.getElementById("toggleAnnex");
-      toggle.addEventListener("change", () => {
-        setAnnexVisibility(toggle.checked);
-      });
     });
   </script>
 </body>

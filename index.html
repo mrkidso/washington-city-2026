@@ -357,14 +357,39 @@
         const labelText = (text || "").trim();
         if (!labelText) continue;
 
-        // IMPORTANT FIX: ensure label point is on/inside the polygon
-        let pt;
-        try {
-          pt = turf.pointOnFeature(f);
-        } catch (e) {
-          // If geometry is invalid, skip this feature
-          continue;
-        }
+        // Robust label point:
+// 1) Flatten MultiPolygons into individual polygons
+// 2) If self-intersecting, unkink into valid polygons
+// 3) Choose the largest polygon piece
+// 4) Place a point on that piece
+let pt;
+try {
+  // Flatten to individual polygon features
+  const flattened = turf.flatten(f);
+
+  let bestPoly = null;
+  let bestArea = -Infinity;
+
+  for (const piece of flattened.features) {
+    // If piece is self-intersecting, unkink it into valid polygons
+    const unkinked = turf.unkinkPolygon(piece);
+
+    for (const p of unkinked.features) {
+      const a = turf.area(p);
+      if (a > bestArea) {
+        bestArea = a;
+        bestPoly = p;
+      }
+    }
+  }
+
+  if (!bestPoly) continue;
+
+  // point guaranteed to be on/inside the chosen polygon piece
+  pt = turf.pointOnFeature(bestPoly);
+} catch (e) {
+  continue;
+}
 
         const coords = pt && pt.geometry && pt.geometry.coordinates;
         if (!coords || coords.length < 2) continue;
